@@ -1,4 +1,11 @@
-FreeRADIUS 3.2.7 Sat 24 Aug 2024 12:00:00 UTC urgency=low
+FreeRADIUS 3.2.8 Fri 31 Jan 2025 12:00:00 UTC urgency=low
+	Configuration changes
+
+	Feature improvements
+
+	Bug fixes
+
+FreeRADIUS 3.2.7 Fri 31 Jan 2025 12:00:00 UTC urgency=low
 	Configuration changes
 	* The dpsk module now supports dynamic expansion of the
 	  "filename" parameter.
@@ -9,6 +16,11 @@ FreeRADIUS 3.2.7 Sat 24 Aug 2024 12:00:00 UTC urgency=low
 	  the "eap" module.
 	* Change idle timeout for incoming radsec connections, to
 	  better match behavior of radsecproxy.
+	* python2 and rlm_couchbase are no longer available in the
+	  alpine docker image.
+	* utmp files are becoming obsolete due to 32-bit time. unix/radwtmp
+	  have been commented out in the default config and "radlast" is
+	  no longer installed if "last" is not present on the system.
 
 	Feature improvements
 	* Print MD5 hash of the configuration files in debug mode.
@@ -35,6 +47,8 @@ FreeRADIUS 3.2.7 Sat 24 Aug 2024 12:00:00 UTC urgency=low
 	  connections from this client, this section is used in preference
 	  to the "listen" TLS settings.  This allows a server to easily
 	  present different identities to different clients.
+	* RADIUS/TLS has been updated for TLS-PSK and TLS 1.3.  Tested with
+	  radsecproxy.
 
 	Bug fixes
 	* For EAP-TLS, send TLS start without a length field.
@@ -54,6 +68,8 @@ FreeRADIUS 3.2.7 Sat 24 Aug 2024 12:00:00 UTC urgency=low
 	  good thing is unknown.
 	* Better handler single-character expansions.  Fixes #2216.
 	* Correct calculation of EAP length in pre-proxy.  Fixes #5486.
+	* Don't segfault when using detail listeners. Fixes #5485
+	* Add check for Couchbase v2, rlm_couchbase won't build on v3.
 
 FreeRADIUS 3.2.6 Sat 24 Aug 2024 12:00:00 UTC urgency=low
 	Configuration changes

@@ -45,7 +45,6 @@ USES_APPLE_DEPRECATED_API	/* OpenSSL API has been deprecated by Apple */
 #ifdef HAVE_UTIME_H
 #include <utime.h>
 #endif
-#include <ctype.h>
 
 #ifdef WITH_TLS
 #  ifdef HAVE_OPENSSL_RAND_H
@@ -358,113 +357,6 @@ int tls_error_io_log(REQUEST *request, tls_session_t *session, int ret, char con
 }
 
 #ifdef PSK_MAX_IDENTITY_LEN
-static bool identity_is_safe(const char *identity)
-{
-	char c;
-
-	if (!identity) return true;
-
-	while ((c = *(identity++)) != '\0') {
-		if (isalpha((uint8_t) c) || isdigit((uint8_t) c) || isspace((uint8_t) c) ||
-		    (c == '@') || (c == '-') || (c == '_') || (c == '.')) {
-			continue;
-		}
-
-		return false;
-	}
-
-	return true;
-}
-
-/*
- *	When a client uses TLS-PSK to talk to a server, this callback
- *	is used by the server to determine the PSK to use.
- */
-static unsigned int psk_server_callback(SSL *ssl, const char *identity,
-					unsigned char *psk,
-					unsigned int max_psk_len)
-{
-	unsigned int psk_len = 0;
-	fr_tls_server_conf_t *conf;
-	REQUEST *request;
-
-	conf = (fr_tls_server_conf_t *)SSL_get_ex_data(ssl,
-						       FR_TLS_EX_INDEX_CONF);
-	if (!conf) return 0;
-
-	request = (REQUEST *)SSL_get_ex_data(ssl,
-					     FR_TLS_EX_INDEX_REQUEST);
-	if (request && conf->psk_query) {
-		size_t hex_len;
-		VALUE_PAIR *vp, **certs;
-		TALLOC_CTX *talloc_ctx;
-		char buffer[2 * PSK_MAX_PSK_LEN + 4]; /* allow for too-long keys */
-
-		/*
-		 *	The passed identity is weird.  Deny it.
-		 */
-		if (!identity_is_safe(identity)) {
-			RWDEBUG("(TLS) %s - Invalid characters in PSK identity %s", conf->name, identity);
-			return 0;
-		}
-
-		vp = pair_make_request("TLS-PSK-Identity", identity, T_OP_SET);
-		if (!vp) return 0;
-
-		certs = (VALUE_PAIR **)SSL_get_ex_data(ssl, fr_tls_ex_index_certs);
-		talloc_ctx = SSL_get_ex_data(ssl, FR_TLS_EX_INDEX_TALLOC);
-		fr_assert(certs != NULL); /* pointer to sock->certs */
-		fr_assert(talloc_ctx != NULL); /* sock */
-
-		fr_pair_add(certs, fr_pair_copy(talloc_ctx, vp));
-
-		hex_len = radius_xlat(buffer, sizeof(buffer), request, conf->psk_query,
-				      NULL, NULL);
-		if (!hex_len) {
-			RWDEBUG("(TLS) %s - PSK expansion returned an empty string.", conf->name);
-			return 0;
-		}
-
-		/*
-		 *	The returned key is truncated at MORE than
-		 *	OpenSSL can handle.  That way we can detect
-		 *	the truncation, and complain about it.
-		 */
-		if (hex_len > (2 * max_psk_len)) {
-			RWDEBUG("(TLS) %s - Returned PSK is too long (%u > %u)", conf->name,
-				(unsigned int) hex_len, 2 * max_psk_len);
-			return 0;
-		}
-
-		/*
-		 *	Leave the TLS-PSK-Identity in the request, and
-		 *	convert the expansion from printable string
-		 *	back to hex.
-		 */
-		return fr_hex2bin(psk, max_psk_len, buffer, hex_len);
-	}
-
-	if (!conf->psk_identity) {
-		DEBUG("No static PSK identity set.  Rejecting the user");
-		return 0;
-	}
-
-	/*
-	 *	No REQUEST, or no dynamic query.  Just look for a
-	 *	static identity.
-	 */
-	if (strcmp(identity, conf->psk_identity) != 0) {
-		ERROR("(TKS) Supplied PSK identity %s does not match configuration.  Rejecting.",
-		      identity);
-		return 0;
-	}
-
-	psk_len = strlen(conf->psk_password);
-	if (psk_len > (2 * max_psk_len)) return 0;
-
-	return fr_hex2bin(psk, max_psk_len, conf->psk_password, psk_len);
-}
-
 static unsigned int psk_client_callback(SSL *ssl, UNUSED char const *hint,
 					char *identity, unsigned int max_identity_len,
 					unsigned char *psk, unsigned int max_psk_len)
@@ -1416,6 +1308,9 @@ void tls_session_information(tls_session_t *tls_session)
 
 				case SSL3_AD_ILLEGAL_PARAMETER:
 					str_details2 = " illegal_parameter";
+					if (tls_session->conf->psk_identity || tls_session->conf->psk_query) {
+						details = "the client and server have different values for the PSK";
+					}
 					break;
 
 				case TLS1_AD_UNKNOWN_CA:
@@ -2614,23 +2509,28 @@ static int ocsp_parse_cert_url(X509 *cert, char **host_out, char **port_out,
 			       char **path_out, int *is_https)
 {
 	int			i;
-	bool			found_uri = false;
 
 	AUTHORITY_INFO_ACCESS	*aia;
 	ACCESS_DESCRIPTION	*ad;
+	int			ret = -1;
 
 	aia = X509_get_ext_d2i(cert, NID_info_access, NULL, NULL);
+
+	if (!aia) return 0;
 
 	for (i = 0; i < sk_ACCESS_DESCRIPTION_num(aia); i++) {
 		ad = sk_ACCESS_DESCRIPTION_value(aia, i);
 		if (OBJ_obj2nid(ad->method) != NID_ad_OCSP) continue;
 		if (ad->location->type != GEN_URI) continue;
-		found_uri = true;
 
 		if (OCSP_parse_url((char *) ad->location->d.ia5->data, host_out,
-				   port_out, path_out, is_https)) return 1;
+				   port_out, path_out, is_https)) {
+			ret = 1;
+			break;
+		}
 	}
-	return found_uri ? -1 : 0;
+	AUTHORITY_INFO_ACCESS_free(aia);
+	return ret;
 }
 
 /*
@@ -2821,7 +2721,7 @@ static ocsp_status_t ocsp_check(REQUEST *request, X509_STORE *store, X509 *issue
 	}
 	bresp = OCSP_response_get1_basic(resp);
 	if (!bresp) {
-		RDEBUG("ocsp: Failed parsing response");
+		tls_error_log(request, "ocsp: Failed parsing response");
 		goto ocsp_end;
 	}
 
@@ -2830,13 +2730,13 @@ static ocsp_status_t ocsp_check(REQUEST *request, X509_STORE *store, X509 *issue
 		goto ocsp_end;
 	}
 	if (OCSP_basic_verify(bresp, untrusted, store, 0)!=1){
-		REDEBUG("ocsp: Couldn't verify OCSP basic response");
+		tls_error_log(request, "ocsp: Couldn't verify OCSP basic response");
 		goto ocsp_end;
 	}
 
 	/*	Verify OCSP cert status */
 	if (!OCSP_resp_find_status(bresp, certid, &status, &reason, &rev, &thisupd, &nextupd)) {
-		REDEBUG("ocsp: No Status found");
+		tls_error_log(request, "ocsp: No Status found");
 		goto ocsp_end;
 	}
 
@@ -3200,6 +3100,7 @@ int cbtls_verify(int ok, X509_STORE_CTX *ctx)
 			vp = fr_pair_make(talloc_ctx, certs, cert_attr_names[FR_TLS_CDP][lookup], cdp, T_OP_ADD);
 			rdebug_pair(L_DBG_LVL_2, request, vp, NULL);
 		}
+		sk_DIST_POINT_pop_free(crl_dp, DIST_POINT_free);
 	}
 
 	/*
@@ -4017,7 +3918,7 @@ SSL_CTX *tls_init_ctx(fr_tls_server_conf_t *conf, int client, char const *chain_
 		}
 
 		if (conf->psk_password && *conf->psk_password) {
-			ERROR(LOG_PREFIX ": Invalid PSK Configuration: psk_password and psk_query cannot be used at the same time.");
+			ERROR(LOG_PREFIX ": Invalid PSK Configuration: psk_hexphrase and psk_query cannot be used at the same time.");
 			return NULL;
 		}
 
@@ -4037,12 +3938,12 @@ SSL_CTX *tls_init_ctx(fr_tls_server_conf_t *conf, int client, char const *chain_
 
 
 		if (!conf->psk_password || !*conf->psk_password) {
-			ERROR(LOG_PREFIX ": Invalid PSK Configuration: psk_identity is set, but there is no psk_password");
+			ERROR(LOG_PREFIX ": Invalid PSK Configuration: psk_identity is set, but there is no psk_hexphrase");
 			return NULL;
 		}
 
 	} else if (conf->psk_password) {
-		ERROR(LOG_PREFIX ": Invalid PSK Configuration: psk_password is set, but there is no psk_identity");
+		ERROR(LOG_PREFIX ": Invalid PSK Configuration: psk_hexphrase is set, but there is no psk_identity");
 		return NULL;
 	}
 
@@ -4051,6 +3952,9 @@ SSL_CTX *tls_init_ctx(fr_tls_server_conf_t *conf, int client, char const *chain_
 	 */
 	if (!client && (conf->psk_identity || conf->psk_query)) {
 		SSL_CTX_set_psk_server_callback(ctx, psk_server_callback);
+#if OPENSSL_VERSION_NUMBER >= 0x10101000
+		SSL_CTX_set_psk_find_session_callback(ctx, cbtls_psk_find_session);
+#endif
 	}
 
 	/*
@@ -4924,7 +4828,7 @@ fr_tls_server_conf_t *tls_server_conf_parse(CONF_SECTION *cs)
 	 *	PSK query.
 	 */
 #ifdef PSK_MAX_IDENTITY_LEN
-	if (conf->psk_identity) {
+	if (conf->psk_identity || conf->psk_query) {
 		if (conf->private_key_file) {
 			WARN(LOG_PREFIX ": Ignoring private key file due to psk_identity being used");
 		}
