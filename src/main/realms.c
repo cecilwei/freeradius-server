@@ -3670,11 +3670,6 @@ int home_server_pool_delete(home_pool_t *pool) {
 		if (home->currently_outstanding > 0 || home->ev != NULL) {
 			DEBUG("Home server %s still has outstanding requests", home->name);
 			can_remove = false;
-
-			struct timeval now;
-
-			gettimeofday(&now, NULL);
-			mark_home_server_dead(home, &now, true);
 			break;
 		}
 	}
