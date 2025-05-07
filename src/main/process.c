@@ -714,6 +714,30 @@ static void schedule_home_pool_cleanup(home_pool_t *pool) {
 		ERROR("Failed to insert home pool cleanup event");
 	}
 }
+
+static void retry_delete_home_server(void *ctx)
+{
+	home_server_t *home = ctx;
+
+	if (!home->dynamic) return;
+	fr_event_delete(el, &home->ev);
+	if (home_server_delete(home) < 0) {
+		WARN("Retry delete failed for home server %s - %s", home->name, fr_strerror());
+
+		// Reschedule one more time (or count retries to limit)
+		struct timeval when;
+		fr_event_now(el, &when);
+		when.tv_sec += 60;
+		fr_event_delete(el, &home->ev);
+		if (!fr_event_insert(el, retry_delete_home_server, home, &when, &home->ev)) {
+			ERROR("Failed to reschedule retry for home server %s", home->name);
+		}
+		return;
+	}
+
+	DEBUG("Successfully deleted dynamic home server %s on retry", home->name);
+}
+
 #endif
 
 
@@ -6017,7 +6041,7 @@ static void event_new_fd(void *ctx)
 					if (home_server_delete(home) < 0) {
 						ERROR("Fatal error removing dynamic home server - %s",
 						      fr_strerror());
-						fr_exit(1);
+						retry_delete_home_server(home);
 					}
 				}
 			}
