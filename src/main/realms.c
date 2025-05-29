@@ -204,7 +204,7 @@ static int home_pool_name_cmp(void const *one, void const *two)
 	home_pool_t const *b = two;
 
 	if (a->server_type < b->server_type) return -1;
-	// if (a->server_type > b->server_type) return +1;
+	if (a->server_type > b->server_type) return +1;
 
 	return strcasecmp(a->name, b->name);
 }

@@ -689,7 +689,7 @@ static void schedule_home_pool_cleanup(home_pool_t *pool);
 static void home_server_pool_cleanup(void *ctx) {
 	home_pool_t *pool = ctx;
 
-	if (home_pool_byname(pool->name, HOME_TYPE_AUTH_ACCT) == NULL) {
+	if (home_pool_byname(pool->name, pool->server_type) == NULL) {
 		return;
 	}
 	for (int i = 0; i < pool->num_home_servers; i++) {
@@ -705,7 +705,7 @@ static void schedule_home_pool_cleanup(home_pool_t *pool) {
 	if (pool->ev != NULL) {
 		return;
 	}
-	DEBUG("Cleaning up home pool %p in 60 seconds", pool);
+	DEBUG("Cleaning up home pool %s in 60 seconds", pool->name);
 	struct timeval when;
 	fr_event_now(el, &when);
 	when.tv_sec += 60;
