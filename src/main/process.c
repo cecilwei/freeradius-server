@@ -3920,6 +3920,17 @@ static int request_proxy_anew(REQUEST *request)
 	/*
 	 *	Find a live home server for the request.
 	 */
+	if (request->home_pool == NULL) {
+		REDEBUG2("Failed to find live home server for request");
+		if (setup_post_proxy_fail(request)) {
+			ASSERT_MASTER;
+			request_queue_or_run(request, proxy_running); /* network thread - timer */
+		} else {
+			gettimeofday(&request->reply->timestamp, NULL);
+			request_cleanup_delay_init(request);
+		}
+		return 0;
+	}
 	home = home_server_ldb(NULL, request->home_pool, request);
 	if (!home) {
 		REDEBUG2("Failed to find live home server for request");
@@ -6012,9 +6023,8 @@ static void event_new_fd(void *ctx)
 			fr_packet_list_walk(proxy_list, this, eol_proxy_listener);
 
 			if (!fr_packet_list_socket_del(proxy_list, this->fd)) {
-				ERROR("Fatal error removing socket %s: %s",
-				      buffer, fr_strerror());
-				fr_exit(1);
+				WARN("Proxy socket %s already removed from packet list",
+				     buffer);
 			}
 
 #ifdef WITH_TLS
@@ -6360,6 +6370,53 @@ static void create_default_proxy_listener(int af)
 	radius_update_listener(this);
 }
 
+#define PROXY_IDLE_TIMEOUT 5
+
+static fr_event_t *proxy_idle_ev = NULL;
+
+/*
+ *	Periodic timer to reclaim proxy sockets that have been idle
+ *	(num_outgoing == 0) for longer than PROXY_IDLE_TIMEOUT seconds.
+ *	Runs in the main event loop thread.
+ */`
+static void proxy_idle_socket_cleanup(UNUSED void *ctx)
+{
+	struct timeval when;
+	void *stale_ctx;
+	int stale_fd;
+
+	ASSERT_MASTER;
+
+	PTHREAD_MUTEX_LOCK(&proxy_mutex);
+
+	while ((stale_fd = fr_packet_list_socket_find_stale(proxy_list, PROXY_IDLE_TIMEOUT, &stale_ctx)) >= 0) {
+		rad_listen_t *stale = stale_ctx;
+
+		fr_packet_list_socket_del(proxy_list, stale_fd);
+		stale->status = RAD_LISTEN_STATUS_REMOVE_NOW;
+
+#ifdef HAVE_PTHREAD_H
+		proxy_no_new_sockets = false;
+#endif
+		PTHREAD_MUTEX_UNLOCK(&proxy_mutex);
+
+		event_new_fd(stale);
+
+		PTHREAD_MUTEX_LOCK(&proxy_mutex);
+	}
+
+	PTHREAD_MUTEX_UNLOCK(&proxy_mutex);
+
+	gettimeofday(&when, NULL);
+	when.tv_sec += PROXY_IDLE_TIMEOUT;
+
+	ASSERT_MASTER;
+	if (!fr_event_insert(el, proxy_idle_socket_cleanup, NULL, &when,
+			     &proxy_idle_ev)) {
+		ERROR("Failed re-inserting proxy idle cleanup timer");
+	}
+}
+
 /*
  *	See if we automatically need to open a proxy socket.
  */
@@ -6557,6 +6614,18 @@ int radius_event_start(CONF_SECTION *cs, bool have_children)
 
 #ifdef WITH_PROXY
 	check_proxy(head);
+
+	if (main_config.proxy_requests && proxy_list) {
+		struct timeval when;
+
+		gettimeofday(&when, NULL);
+		when.tv_sec += PROXY_IDLE_TIMEOUT;
+
+		if (!fr_event_insert(el, proxy_idle_socket_cleanup, NULL,
+				     &when, &proxy_idle_ev)) {
+			ERROR("Failed inserting proxy idle cleanup timer");
+		}
+	}
 #endif
 
 	/*

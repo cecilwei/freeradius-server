@@ -61,6 +61,7 @@ bool fr_packet_list_socket_add(fr_packet_list_t *pl, int sockfd, int proto,
 			       fr_ipaddr_t *dst_ipaddr, uint16_t dst_port,
 			       void *ctx);
 bool fr_packet_list_socket_del(fr_packet_list_t *pl, int sockfd);
+int fr_packet_list_socket_find_stale(fr_packet_list_t *pl, int idle_timeout, void **ctx);
 bool fr_packet_list_socket_freeze(fr_packet_list_t *pl, int sockfd);
 bool fr_packet_list_socket_thaw(fr_packet_list_t *pl, int sockfd);
 int fr_packet_list_walk(fr_packet_list_t *pl, void *ctx, rb_walker_t callback);

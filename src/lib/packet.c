@@ -277,6 +277,7 @@ typedef struct fr_packet_socket_t {
 	uint32_t	counter;
 #endif
 
+	time_t		last_idle;
 	uint8_t		id[32];
 } fr_packet_socket_t;
 
@@ -372,6 +373,35 @@ bool fr_packet_list_socket_del(fr_packet_list_t *pl, int sockfd)
 	pl->num_sockets--;
 
 	return true;
+}
+
+
+/*
+ *	Find a destination-specific socket with no outstanding requests
+ *	that has been idle for at least idle_timeout seconds.
+ *	Returns the sockfd, or -1 if none found.  Skips wildcard sockets
+ *	(the default proxy socket) so they are never reclaimed.
+ */
+int fr_packet_list_socket_find_stale(fr_packet_list_t *pl, int idle_timeout, void **ctx)
+{
+	int i;
+	time_t now = time(NULL);
+
+	if (!pl) return -1;
+
+	for (i = 0; i < MAX_SOCKETS; i++) {
+		if (pl->sockets[i].sockfd == -1) continue;
+		if (pl->sockets[i].num_outgoing != 0) continue;
+		if (pl->sockets[i].dont_use) continue;
+		if (pl->sockets[i].dst_any && (pl->sockets[i].dst_port == 0)) continue;
+		if (pl->sockets[i].last_idle == 0) continue;
+		if ((now - pl->sockets[i].last_idle) < idle_timeout) continue;
+
+		if (ctx) *ctx = pl->sockets[i].ctx;
+		return pl->sockets[i].sockfd;
+	}
+
+	return -1;
 }
 
 
@@ -944,6 +974,10 @@ bool fr_packet_list_id_free(fr_packet_list_t *pl,
 
 	ps->num_outgoing--;
 	pl->num_outgoing--;
+
+	if (ps->num_outgoing == 0) {
+		ps->last_idle = time(NULL);
+	}
 
 	request->id = -1;
 	request->src_ipaddr.af = AF_UNSPEC; /* id_alloc checks this */
